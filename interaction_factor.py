@@ -18,8 +18,12 @@
 """
 
 import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
 from skimage import io, measure
 from skimage.draw import ellipse_perimeter
+from skimage.transform import rotate
 from scipy import ndimage
 import random
 
@@ -143,9 +147,15 @@ class interaction_factor:
         self.ref_size=1
         self.nonref_number=None
         self.ref_number=None
+        self.rotate_ref=True
         
         # Directory for saving output of either function
         self.save_dir=''
+
+        # Setting to allow nearby clusters to be consdiered as 'overlap' for IF calculation
+        # expand_pixels indicates how much of pixel border around cluster to consider as 'overlapping'
+        self.allow_nearby_clusters = False
+        self.expand_pixels = 1
                  
     """ 
     Calculates measurements for the input (orig) image 
@@ -173,18 +183,84 @@ class interaction_factor:
         labeled_clusters, num_clusters = ndimage.label(self.cluster_masks[self.ref_color], structure=self.labeling_structure)
         props = measure.regionprops(labeled_clusters)
         self.orig_num_ref_ov_clusters = 0
+        height = len(self.cluster_masks[self.nonref_color])
+        width = len(self.cluster_masks[self.nonref_color][0]) #check!
         for region in props:
             coords = region.coords
             overlap_nonref = False
             for i in np.arange(0,len(coords)):
-                row_coords = coords[i][0]
-                column_coords = coords[i][1]
-                if(self.cluster_masks[self.nonref_color][row_coords,column_coords]):
+                y = coords[i][0]
+                x = coords[i][1]
+                if (self.allow_nearby_clusters):
+                    # first make sure it's a border pixel
+                    border_pixel = False
+                    for x_add_px in [-1, 0, 1]:
+                        for y_add_px in [-1, 0, 1]:
+                            if (y + y_add_px >= height or x + x_add_px >= width or y + y_add_px < 0 or x + x_add_px < 0 or
+                                    (not self.cluster_masks[self.ref_color][y + y_add_px, x + x_add_px])):
+                                border_pixel = True
+                    # then look for overlap
+                    if (border_pixel):
+                        for x_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
+                            for y_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
+                                if (y + y_add_px < height and x + x_add_px < width and y + y_add_px >= 0 and x + x_add_px >= 0 and
+                                        self.cluster_masks[self.nonref_color][y + y_add_px, x + x_add_px]):
+                                    overlap_nonref = True
+                                    break
+                    elif(self.cluster_masks[self.nonref_color][y, x]): #(if not on border, only look at the single position)
+                        overlap_nonref=True
+                        break
+                elif(self.cluster_masks[self.nonref_color][y, x]):
                     overlap_nonref = True
-                    break  
+                    break
+
             if(overlap_nonref): 
-                self.orig_num_ref_ov_clusters += 1  
-    
+                self.orig_num_ref_ov_clusters += 1
+
+    def draw_outline_nearby_clusters(self):
+        #draws expanded outlines around nonref clusters in rgb image mask,
+        #based on expand_pixels setting, for use as a display image when using allow_nearby_clusters setting
+        #returns rgb image with outlines and also saves to save_dir
+
+        outline_image = np.zeros((len(self.cluster_masks[self.nonref_color]), len(self.cluster_masks[self.nonref_color][0]), 3), dtype='uint8')
+        self._ch2color(outline_image, self.cluster_masks[self.nonref_color], self.save_colors[0])
+        self._ch2color(outline_image, self.cluster_masks[self.ref_color], self.save_colors[1])
+        outline_image = 255 * outline_image.astype('uint8')
+
+        labeled_clusters, num_clusters = ndimage.label(self.cluster_masks[self.ref_color], structure=self.labeling_structure)
+        props = measure.regionprops(labeled_clusters)
+        height = len(self.cluster_masks[self.nonref_color])
+        width = len(self.cluster_masks[self.nonref_color][0])
+
+        for region in props:
+            coords = region.coords
+            for i in np.arange(0, len(coords)):
+                y = coords[i][0]
+                x = coords[i][1]
+
+                # first make sure it's a border pixel
+                border_pixel=False
+                for x_add_px in [-1,0,1]:
+                    for y_add_px in [-1,0,1]:
+                        if (y + y_add_px >= height or x + x_add_px >= width or y + y_add_px < 0 or x + x_add_px < 0 or
+                                (not self.cluster_masks[self.ref_color][y + y_add_px, x + x_add_px])):
+                            border_pixel=True
+
+                #then draw outline
+                if(border_pixel):
+                    for x_add_px in range(-1*self.expand_pixels,self.expand_pixels + 1, 1):
+                        for y_add_px in range(-1*self.expand_pixels,self.expand_pixels + 1, 1):
+                            if (y + y_add_px < height and x + x_add_px < width and y + y_add_px >=0 and x + x_add_px >= 0 and
+                                    (not self.cluster_masks[self.ref_color][y + y_add_px, x + x_add_px]) and
+                                    (not self.cluster_masks[self.nonref_color][y + y_add_px, x + x_add_px])):
+                                outline_image[y + y_add_px, x + x_add_px] = [255, 255, 255]
+
+        #save
+        if(self.save_dir != ''):
+            io.imsave(self.save_dir + '/expanded_clusters-orig_image.tif', outline_image)
+
+        return outline_image
+
     """ 
     Calculates the IF for an image 
     - returns tuple containing: (IF, p-value, % of ref clusters overlapping nonref clusters for original image)
@@ -203,7 +279,9 @@ class interaction_factor:
         for sim_i in range(self.num_random_sims):
             if(self.save_random_images): self.image_file_prefix = str(sim_i+1)
             self.simulate_IF() #run sim for IF==0
-            
+
+            print(str(sim_i) + ' ' + str(self.sim_num_ref_ov_clusters) + ' ' + str(float(self.sim_num_ref_ov_clusters) / self.num_clusters[self.ref_color]))
+
             x_data.append(float(self.sim_num_ref_ov_clusters) /
                                 self.num_clusters[self.ref_color])
             if(sim_i == 0):
@@ -250,7 +328,6 @@ class interaction_factor:
         p_val = count_p / float(len(x_data)) 
              
         if(self.plot_IF_curve and self.save_dir != ''):
-            import matplotlib.pyplot as plt
             fig1 = plt.figure()
             ax = fig1.add_subplot(111)
             ax.axhline(y=orig_meas)
@@ -314,8 +391,7 @@ class interaction_factor:
         if(self.move_nonref):
 
             #generating random image, restricted to bbox of the ROI
-            self.simulated_images[self.nonref_color] = np.zeros(self.cluster_masks[self.nonref_color].shape,
-                                                                dtype='uint8')
+            self.simulated_images[self.nonref_color] = np.zeros(self.cluster_masks[self.nonref_color].shape,dtype='uint8')
             for region in self.cluster_props[self.nonref_color]:
                 bounding_box = region.bbox
                 coords = region.coords
@@ -326,7 +402,7 @@ class interaction_factor:
                 region_height = max_row-min_row
                 region_width = max_col-min_col
                 cluster_at_origin = coords - np.array([min_row,min_col])
-                
+
                 max_num_tries = 10000
                 num_tries = 0
                 while num_tries < max_num_tries:
@@ -344,7 +420,7 @@ class interaction_factor:
                         break
                         
                 if(placement_failed):
-                    print "Warning: placement of non-reference cluster failed: max_num_tries exceeded."
+                    print("Warning: placement of non-reference cluster failed: max_num_tries exceeded.")
                     #print warning to error log since exceeded max_tries
                 else:
                     #place cluster
@@ -365,9 +441,12 @@ class interaction_factor:
                                                                 dtype='uint8')
                 for region in self.cluster_props[self.nonref_color]: #these are the ellipses
                     coords = region.coords
-                    self.simulated_images[self.nonref_color][coords[i][0],coords[i][1]] = 255
+                    #self.simulated_images[self.nonref_color][coords[i][0],coords[i][1]] = 255
+                    for i in len(coords):
+                        self.simulated_images[self.nonref_color][coords[i][0], coords[i][1]] = 255
             else:
-                self.simulated_images[self.nonref_color] = self.cluster_masks[self.nonref_color][:][:] #deep copy
+                #create 'simulated image' from mask image, which is just the mask image changed to intensity image
+                self.simulated_images[self.nonref_color] = self.intensity_image[:,:,self.nonref_color] * self.cluster_masks[self.nonref_color].astype('uint8')
                  
         #(2) placement of reference color
         self.simulated_images[self.ref_color] = np.zeros(self.cluster_masks[self.ref_color].shape,
@@ -377,8 +456,10 @@ class interaction_factor:
         self.sim_num_ref_ov_clusters = 0
         
         #for each ref cluster, stores whether it is overlapping a nonref cluster (True/False)
-        self.ref_cluster_ov = {} 
-        
+        self.ref_cluster_ov = {}
+
+        height = len(self.simulated_images[self.nonref_color])
+        width = len(self.simulated_images[self.nonref_color][0])  # check!
         for region in self.cluster_props[self.ref_color]:
             label = region.label
             bounding_box = region.bbox
@@ -393,6 +474,30 @@ class interaction_factor:
             region_height = max_row-min_row
             region_width = max_col-min_col
             cluster_at_origin = coords - np.array([min_row,min_col])
+
+            if(self.rotate_ref):
+                # cluster rotation- (1) choose random angle, (2) transform
+                if(len(region.image) >=2 and len(region.image[0]) >= 2):
+                    angle = random.randint(0, 360)
+                    cluster_rot_img = rotate(region.image.astype('uint8'), angle, resize=True)
+                    cluster_rot_img = cluster_rot_img>0
+
+                    #rotation leaves border, get rid of...
+                    l, n = ndimage.label(cluster_rot_img, structure=self.labeling_structure)
+                    p = measure.regionprops(l)
+
+                    l, n = ndimage.label(p[0].image, structure=self.labeling_structure)
+                    p = measure.regionprops(l)
+                    cluster_rot_coords = p[0].coords
+
+                    region_height = int(p[0].bbox[2]) - int(p[0].bbox[0])
+                    region_width = int(p[0].bbox[3]) - int(p[0].bbox[1])
+
+                    #io.imsave('/Users/sarahkeegan/fenyolab/temp/orig.tif', region.image.astype('uint8')*255)
+                    #io.imsave('/Users/sarahkeegan/fenyolab/temp/rot.tif', p[0].image.astype('uint8')*255)
+
+                else:
+                    cluster_rot_coords = cluster_at_origin
             
             max_num_tries = 10000
             num_tries = 0
@@ -400,7 +505,10 @@ class interaction_factor:
                 #generating random number and new coordinates 
                 random_row = random.randint(self.roi_min_row, self.roi_max_row-region_height)
                 random_col = random.randint(self.roi_min_col, self.roi_max_col-region_width)
-                new_coords = cluster_at_origin + np.array([random_row,random_col])
+                if(self.rotate_ref):
+                    new_coords = cluster_rot_coords + np.array([random_row,random_col])
+                else:
+                    new_coords = cluster_at_origin + np.array([random_row, random_col])
                 
                 placement_failed = False
                 if ((self.use_roi and self._outside_roi(new_coords)) or self._overlapping(new_coords, self.ref_color)):
@@ -411,12 +519,30 @@ class interaction_factor:
                     #uniform (IF == 0) or with increased probability of overlap (IF > 0)
                     overlap_nonref = False
                     for i in np.arange(0,len(new_coords)):
-                        row_coords = new_coords[i][0]
-                        column_coords = new_coords[i][1]
-                        nonref_pixel_val = self.simulated_images[self.nonref_color][row_coords,column_coords]
-                        if nonref_pixel_val != 0:
+                        y = new_coords[i][0]
+                        x = new_coords[i][1]
+                        if (self.allow_nearby_clusters):
+                            # first check if it's a border pixel
+                            border_pixel = False
+                            for x_add_px in [-1, 0, 1]:
+                                for y_add_px in [-1, 0, 1]:
+                                    if (y + y_add_px >= height or x + x_add_px >= width or y + y_add_px < 0 or x + x_add_px < 0 or
+                                            (self.simulated_images[self.ref_color][y + y_add_px, x + x_add_px] == 0)):
+                                        border_pixel = True
+                            # then look for overlap
+                            if (border_pixel):
+                                for x_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
+                                    for y_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
+                                        if (y + y_add_px < height and x + x_add_px < width and y + y_add_px >= 0 and x + x_add_px >= 0 and
+                                                (self.simulated_images[self.nonref_color][y + y_add_px, x + x_add_px] != 0)):
+                                            overlap_nonref = True
+                                            break
+                            elif(self.simulated_images[self.nonref_color][y,x] != 0):
+                                overlap_nonref = True
+                                break
+                        elif(self.simulated_images[self.nonref_color][y,x] != 0):
                             overlap_nonref = True
-                            break                    
+                            break
                     if(IF != 0):
                         if(not overlap_nonref):
                             #no overlap with non-ref cluster, decide whether to re-try cluster placement based on IF,
@@ -431,16 +557,17 @@ class interaction_factor:
                     else:
                         break
             if(placement_failed):
-                print "Warning: placement of reference cluster failed: max_num_tries exceeded."
+                print("Warning: placement of reference cluster failed: max_num_tries exceeded.")
                 #print warning to error log since exceeded max_tries
             else:
                 #place cluster
                 for i in np.arange(0,len(new_coords)):
                     row_coords = new_coords[i][0]
                     column_coords = new_coords[i][1]
-                    orig_row_coords = coords[i][0]
-                    orig_column_coords = coords[i][1]
-                    if(not self.use_ellipses and len(self.intensity_image) > 0):
+                    if(not self.rotate_ref):
+                        orig_row_coords = coords[i][0]
+                        orig_column_coords = coords[i][1]
+                    if(not self.use_ellipses and len(self.intensity_image) > 0 and not self.rotate_ref):
                         self.simulated_images[self.ref_color][row_coords,column_coords] = (
                             self.intensity_image[orig_row_coords,orig_column_coords][self.ref_color])
                     else:
@@ -546,7 +673,8 @@ class interaction_factor:
         for i in np.arange(0,len(coords_cluster)):
             row_coords = coords_cluster[i][0]
             column_coords = coords_cluster[i][1]
-            if self.roi_mask[row_coords,column_coords] == False:
+            # row_coords > len(self.roi_mask) or column_coords > len(self.roi_mask[0]) or
+            if(self.roi_mask[row_coords,column_coords] == False):
                 outside_roi = True
                 break
         return outside_roi

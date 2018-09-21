@@ -73,13 +73,18 @@ def image2mask(image_file, roi_image_file='', reverse_pixels_in_roi=False,
     
     #split to 3 colors
     rgb_image = io.imread(image_file)
-    split_images = []                                                        
+    split_images = []
+
+    if(roi_image_file == ''):
+        roi_mask = np.zeros_like(rgb_image[:,:,0])
+        roi_mask = roi_mask.astype(dtype='bool')
+        roi_selection = ~np.array(roi_mask)
+
     for color_i in range(3):
         
         cur_image = rgb_image[:,:,color_i]
         
-        if(roi_mask != []):
-            cur_image[roi_mask] = 0 #set all pixels outside roi to 0
+        cur_image[roi_mask] = 0 #set all pixels outside roi to 0
             
         #intensity cutoff
         if(intensity_cutoff):
@@ -91,15 +96,18 @@ def image2mask(image_file, roi_image_file='', reverse_pixels_in_roi=False,
         #threshold
         if(cur_image.max() == 0): cur_th = 0
         else:
-            if thresh[color_i] == 'otsu':
-                cur_th = threshold_otsu(cur_image[roi_selection == True])
-            elif thresh[color_i] == 'kmeans':
-                pixels = np.expand_dims(cur_image[roi_selection == True].flatten(),axis=1)
-                ret = k_means(pixels, 3)
-                intensity_cutoffs = sorted(ret[0])
-                cur_th = intensity_cutoffs[2][0]
+            if(type(thresh[color_i]) == type(0) or type(thresh[color_i]) == type(0.0)):
+                cur_th = thresh[color_i] #manual threshold option
             else:
-                cur_th = 0
+                if thresh[color_i] == 'otsu':
+                    cur_th = threshold_otsu(cur_image[roi_selection == True])
+                elif thresh[color_i] == 'kmeans':
+                    pixels = np.expand_dims(cur_image[roi_selection == True].flatten(),axis=1)
+                    ret = k_means(pixels, 3)
+                    intensity_cutoffs = sorted(ret[0])
+                    cur_th = intensity_cutoffs[2][0]
+                else:
+                    cur_th = 0
         
         cur_mask = cur_image > cur_th
             
