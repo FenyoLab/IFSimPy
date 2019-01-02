@@ -442,7 +442,7 @@ class interaction_factor:
                 for region in self.cluster_props[self.nonref_color]: #these are the ellipses
                     coords = region.coords
                     #self.simulated_images[self.nonref_color][coords[i][0],coords[i][1]] = 255
-                    for i in len(coords):
+                    for i in range(len(coords)):
                         self.simulated_images[self.nonref_color][coords[i][0], coords[i][1]] = 255
             else:
                 #create 'simulated image' from mask image, which is just the mask image changed to intensity image
