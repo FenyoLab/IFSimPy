@@ -156,6 +156,8 @@ class interaction_factor:
         # expand_pixels indicates how much of pixel border around cluster to consider as 'overlapping'
         self.allow_nearby_clusters = False
         self.expand_pixels = 1
+
+        self.placement_failed=False  #set to true in simulate_IF if placement of a ref or non-ref cluster fails after max_num_tries
                  
     """ 
     Calculates measurements for the input (orig) image 
@@ -280,7 +282,7 @@ class interaction_factor:
             if(self.save_random_images): self.image_file_prefix = str(sim_i+1)
             self.simulate_IF() #run sim for IF==0
 
-            print(str(sim_i) + ' ' + str(self.sim_num_ref_ov_clusters) + ' ' + str(float(self.sim_num_ref_ov_clusters) / self.num_clusters[self.ref_color]))
+            #print(str(sim_i) + ' ' + str(self.sim_num_ref_ov_clusters) + ' ' + str(float(self.sim_num_ref_ov_clusters) / self.num_clusters[self.ref_color]))
 
             x_data.append(float(self.sim_num_ref_ov_clusters) /
                                 self.num_clusters[self.ref_color])
@@ -362,6 +364,8 @@ class interaction_factor:
                            : a nonref cluster (label is from cluster_props[ref_color])
     """
     def simulate_IF(self, IF=0):
+
+        self.placement_failed=False
         
         #NOTE: if numbers/ellipses are changed here, can't be changed back in a subsequent run
         
@@ -421,7 +425,7 @@ class interaction_factor:
                         
                 if(placement_failed):
                     print("Warning: placement of non-reference cluster failed: max_num_tries exceeded.")
-                    #print warning to error log since exceeded max_tries
+                    self.placement_failed=True
                 else:
                     #place cluster
                     for i in np.arange(0,len(new_coords)):
@@ -475,90 +479,106 @@ class interaction_factor:
             region_width = max_col-min_col
             cluster_at_origin = coords - np.array([min_row,min_col])
 
+            rotate_failed=False
             if(self.rotate_ref):
                 # cluster rotation- (1) choose random angle, (2) transform
                 if(len(region.image) >=2 and len(region.image[0]) >= 2):
-                    angle = random.randint(0, 360)
-                    cluster_rot_img = rotate(region.image.astype('uint8'), angle, resize=True)
-                    cluster_rot_img = cluster_rot_img>0
+                    max_num_tries = 10000
+                    num_tries = 0
+                    while(num_tries < max_num_tries):
+                        rotate_failed = False
 
-                    #rotation leaves border, get rid of...
-                    l, n = ndimage.label(cluster_rot_img, structure=self.labeling_structure)
-                    p = measure.regionprops(l)
+                        angle = random.randint(0, 360)
+                        cluster_rot_img = rotate(region.image.astype('uint8'), angle, resize=True)
+                        cluster_rot_img = cluster_rot_img>0
 
-                    l, n = ndimage.label(p[0].image, structure=self.labeling_structure)
-                    p = measure.regionprops(l)
-                    cluster_rot_coords = p[0].coords
+                        #rotation leaves border, get rid of...
+                        l, n = ndimage.label(cluster_rot_img, structure=self.labeling_structure)
+                        p = measure.regionprops(l)
 
-                    region_height = int(p[0].bbox[2]) - int(p[0].bbox[0])
-                    region_width = int(p[0].bbox[3]) - int(p[0].bbox[1])
+                        l, n = ndimage.label(p[0].image, structure=self.labeling_structure)
+                        p = measure.regionprops(l)
+                        cluster_rot_coords = p[0].coords
 
-                    #io.imsave('/Users/sarahkeegan/fenyolab/temp/orig.tif', region.image.astype('uint8')*255)
-                    #io.imsave('/Users/sarahkeegan/fenyolab/temp/rot.tif', p[0].image.astype('uint8')*255)
+                        region_height = int(p[0].bbox[2]) - int(p[0].bbox[0])
+                        region_width = int(p[0].bbox[3]) - int(p[0].bbox[1])
+
+                        if (self.roi_max_col <= region_width or self.roi_max_row <= region_height):
+                            rotate_failed=True
+                            num_tries += 1
+                        else:
+                            break
+
+                        #io.imsave('/Users/sarahkeegan/fenyolab/temp/orig.tif', region.image.astype('uint8')*255)
+                        #io.imsave('/Users/sarahkeegan/fenyolab/temp/rot.tif', p[0].image.astype('uint8')*255)
 
                 else:
                     cluster_rot_coords = cluster_at_origin
-            
-            max_num_tries = 10000
-            num_tries = 0
-            while num_tries < max_num_tries:
-                #generating random number and new coordinates 
-                random_row = random.randint(self.roi_min_row, self.roi_max_row-region_height)
-                random_col = random.randint(self.roi_min_col, self.roi_max_col-region_width)
-                if(self.rotate_ref):
-                    new_coords = cluster_rot_coords + np.array([random_row,random_col])
-                else:
-                    new_coords = cluster_at_origin + np.array([random_row, random_col])
-                
-                placement_failed = False
-                if ((self.use_roi and self._outside_roi(new_coords)) or self._overlapping(new_coords, self.ref_color)):
-                       placement_failed = True
-                       num_tries += 1 #re-try placement
-                else:
-                    #place cluster based on IF
-                    #uniform (IF == 0) or with increased probability of overlap (IF > 0)
-                    overlap_nonref = False
-                    for i in np.arange(0,len(new_coords)):
-                        y = new_coords[i][0]
-                        x = new_coords[i][1]
-                        if (self.allow_nearby_clusters):
-                            # first check if it's a border pixel
-                            border_pixel = False
-                            for x_add_px in [-1, 0, 1]:
-                                for y_add_px in [-1, 0, 1]:
-                                    if (y + y_add_px >= height or x + x_add_px >= width or y + y_add_px < 0 or x + x_add_px < 0 or
-                                            (self.simulated_images[self.ref_color][y + y_add_px, x + x_add_px] == 0)):
-                                        border_pixel = True
-                            # then look for overlap
-                            if (border_pixel):
-                                for x_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
-                                    for y_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
-                                        if (y + y_add_px < height and x + x_add_px < width and y + y_add_px >= 0 and x + x_add_px >= 0 and
-                                                (self.simulated_images[self.nonref_color][y + y_add_px, x + x_add_px] != 0)):
-                                            overlap_nonref = True
-                                            break
+
+            if(not rotate_failed):
+                max_num_tries = 10000
+                num_tries = 0
+                while num_tries < max_num_tries:
+                    #generating random number and new coordinates
+                    random_row = random.randint(self.roi_min_row, self.roi_max_row - region_height)
+                    random_col = random.randint(self.roi_min_col, self.roi_max_col-region_width)
+                    if(self.rotate_ref):
+                        new_coords = cluster_rot_coords + np.array([random_row,random_col])
+                    else:
+                        new_coords = cluster_at_origin + np.array([random_row, random_col])
+
+                    placement_failed = False
+                    if ((self.use_roi and self._outside_roi(new_coords)) or self._overlapping(new_coords, self.ref_color)):
+                           placement_failed = True
+                           num_tries += 1 #re-try placement
+                    else:
+                        #place cluster based on IF
+                        #uniform (IF == 0) or with increased probability of overlap (IF > 0)
+                        overlap_nonref = False
+                        for i in np.arange(0,len(new_coords)):
+                            y = new_coords[i][0]
+                            x = new_coords[i][1]
+                            if (self.allow_nearby_clusters):
+                                # first check if it's a border pixel
+                                border_pixel = False
+                                for x_add_px in [-1, 0, 1]:
+                                    for y_add_px in [-1, 0, 1]:
+                                        if (y + y_add_px >= height or x + x_add_px >= width or y + y_add_px < 0 or x + x_add_px < 0 or
+                                                (self.simulated_images[self.ref_color][y + y_add_px, x + x_add_px] == 0)):
+                                            border_pixel = True
+                                # then look for overlap
+                                if (border_pixel):
+                                    for x_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
+                                        for y_add_px in range(-1 * self.expand_pixels, self.expand_pixels + 1, 1):
+                                            if (y + y_add_px < height and x + x_add_px < width and y + y_add_px >= 0 and x + x_add_px >= 0 and
+                                                    (self.simulated_images[self.nonref_color][y + y_add_px, x + x_add_px] != 0)):
+                                                overlap_nonref = True
+                                                break
+                                elif(self.simulated_images[self.nonref_color][y,x] != 0):
+                                    overlap_nonref = True
+                                    break
                             elif(self.simulated_images[self.nonref_color][y,x] != 0):
                                 overlap_nonref = True
                                 break
-                        elif(self.simulated_images[self.nonref_color][y,x] != 0):
-                            overlap_nonref = True
-                            break
-                    if(IF != 0):
-                        if(not overlap_nonref):
-                            #no overlap with non-ref cluster, decide whether to re-try cluster placement based on IF,
-                            #flip "bias coin": e.g. if IF == 0.75, probability of re-try is .75 (and keep is .25)
-                            random_number = round(random.random(),2) #we do not expect to predict IF to more precision than .01
-                            if(random_number <= IF): 
-                                num_tries += 1 #re-try placement
+                        if(IF != 0):
+                            if(not overlap_nonref):
+                                #no overlap with non-ref cluster, decide whether to re-try cluster placement based on IF,
+                                #flip "bias coin": e.g. if IF == 0.75, probability of re-try is .75 (and keep is .25)
+                                random_number = round(random.random(),2) #we do not expect to predict IF to more precision than .01
+                                if(random_number <= IF):
+                                    num_tries += 1 #re-try placement
+                                else:
+                                    break
                             else:
                                 break
-                        else: 
+                        else:
                             break
-                    else:
-                        break
-            if(placement_failed):
+            if (rotate_failed):
+                print("Warning: rotation of reference cluster failed: max_num_tries exceeded.")
+                self.placement_failed = True
+            elif(placement_failed):
                 print("Warning: placement of reference cluster failed: max_num_tries exceeded.")
-                #print warning to error log since exceeded max_tries
+                self.placement_failed = True
             else:
                 #place cluster
                 for i in np.arange(0,len(new_coords)):
